@@ -29,6 +29,9 @@
 #define WORD_SIZE_IN_BYTES 4
 #define MAX_DATA_SIZE 0x10000
 #define DUMMY_CYCLES 0x20 //Dummy cycles are required otherwise the obi master and slave are too slow to process the data
+#define BASE_ADDRESS 0x0000  // Starting address of the target memory
+#define MAX_DATASETS 0
+#define DATA_SET_COUNT (current_address >> 2)
 
 
 typedef enum {
@@ -60,8 +63,16 @@ typedef enum {
     SPI_SLAVE_FLAG_ERROR_INVALID            = 0x0200 
 } spi_slave_flags_e;
 
+typedef struct {
+    uint32_t address;
+    uint16_t length;
+    const char *data_name;
+} spi_data_info_t;
+
+
 spi_host_t* spi_hst; //Removed specific memory assignement
 uint32_t compare_data[DATA_LENGTH/4]; //!!! I have to check whether the process reads out more data than it sent in
+static uint32_t current_address = BASE_ADDRESS;
 
 
 spi_slave_flags_e spi_slave_init(spi_host_t* spi_host);
@@ -76,10 +87,16 @@ void spi_host_wait(uint8_t cycles);
 uint32_t make_word_compatible_for_spi_host(uint32_t word);
 void make_compare_data_compatible(uint32_t *compare_data, uint16_t length);
 void write_wrap_length(uint16_t length);
+uint32_t allocate_address(uint16_t data_length);
+void store_metadata(const char *data_name, uint16_t length);
+spi_data_info_t get_metadata(const char *data_name);
+void print_metadata();
 
 
 int main(int argc, char *argv[])
 {   
+    spi_data_info_t *data_table = malloc(MAX_DATASETS * sizeof(spi_data_info_t));
+
     spi_hst = spi_host1;
     spi_return_flags_e flags;
     flags = spi_slave_init(spi_hst);
@@ -310,28 +327,6 @@ static void configure_spi() {
 
 void write_word_big_endian(uint32_t word){
 
-/*    uint8_t word_in_bytes[4] = {LOWER_BYTE_16_BITS(LOWER_BYTES_32_BITS(word)),
-                                UPPER_BYTE_16_BITS(LOWER_BYTES_32_BITS(word)),
-                                LOWER_BYTE_16_BITS(UPPER_BYTES_32_BITS(word)),
-                                UPPER_BYTE_16_BITS(UPPER_BYTES_32_BITS(word))
-    };
-    const uint32_t send_cmd_byte = spi_create_command((spi_command_t){
-        .len        = 0,                    // 1 Byte (The SPI SLAVE IP can only take one CMD byte at a time)
-        .csaat      = true,                 // Command not finished e.g. CS remains low after transaction
-        .speed      = SPI_SPEED_STANDARD,   // Single speed
-        .direction  = SPI_DIR_TX_ONLY       // Write only
-    });
-
-    for(int i = 0; i < 4; i++){ 
-        // Load command to TX FIFO
-        spi_write_byte(spi_hst, word_in_bytes[i]);
-        spi_wait_for_ready(spi_hst);
-
-        // Load segment parameters to COMMAND register
-        spi_set_command(spi_hst, send_cmd_byte);
-        spi_wait_for_ready(spi_hst);
-    }*/
-
     uint32_t sorted_word = make_word_compatible_for_spi_host(word);
     spi_write_word(spi_hst, sorted_word);
     spi_wait_for_ready(spi_hst);        // Set up segment parameters -> send command and address
@@ -423,6 +418,49 @@ void spi_host_wait(uint8_t cycles){
     spi_wait_for_ready(spi_hst);
 
 }
+
+uint32_t allocate_address(uint16_t data_length) {
+    uint32_t allocated_address = current_address;
+    
+    // Ensure word alignment for addresses
+    uint32_t aligned_length = DIV_ROUND_UP(data_length, WORD_SIZE_IN_BYTES) * WORD_SIZE_IN_BYTES;
+    current_address += aligned_length;
+
+    if (current_address > MAX_DATA_SIZE) {
+        printf("Error: SPI slave memory exceeded.\n");
+        exit(EXIT_FAILURE);
+    }
+
+    return allocated_address;
+}
+
+
+void store_metadata(const char *data_name, uint16_t length) {
+    uint32_t address = allocate_address(length);
+    if (DATA_SET_COUNT >= MAX_DATASETS) {
+        printf("Error: Data table is full.\n");
+        return;
+    }
+    data_table[DATA_SET_COUNT+ 1] = (spi_data_info_t){data_name, address, length};
+}
+
+void print_metadata() {
+    printf("Stored Data Information:\n");
+    for (uint16_t i = 0; i < DATA_SET_COUNT; i++) {
+        printf("Name: %s, Address: 0x%08X, Length: %d bytes\n",
+               data_table[i].data_name, data_table[i].address, data_table[i].length);
+    }
+}
+
+spi_data_info_t get_metadata(const char *req_data_name){
+    for (uint16_t i = 0; i < DATA_SET_COUNT; i++) {
+        if (strcmp(data_table[i].data_name, req_data_name) == 0) {
+            return data_table[i];
+        }
+    }
+}
+
+
 
 void print_array(const char *label, uint32_t *array, uint16_t size) {
     printf("%s: [", label);
